@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ml/ synthetic data and local checkpoints
+ml/data/
+ml/__pycache__/
