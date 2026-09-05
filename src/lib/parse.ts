@@ -5,6 +5,7 @@ export type ParsedStatement = {
   raw: Record<FieldKey, { label: string; line: string } | undefined>;
   unmatchedLines: string[];
   investorName?: string;
+  fundName?: string;
   asOfDate?: string;
 };
 
@@ -54,10 +55,13 @@ export function parseStatement(text: string): ParsedStatement {
   const raw: ParsedStatement["raw"] = {} as ParsedStatement["raw"];
   const unmatchedLines: string[] = [];
   let investorName: string | undefined;
+  let fundName: string | undefined;
   let asOfDate: string | undefined;
 
   const investorMatch = text.match(/investor(?:\s*name)?\s*[:\-]\s*(.+)/i);
   if (investorMatch) investorName = investorMatch[1].trim();
+  const fundMatch = text.match(/^fund(?:\s*name)?\s*[:\-]\s*(.+)$/im);
+  if (fundMatch) fundName = fundMatch[1].trim();
   const dateMatch = text.match(
     /(?:as of|statement date|period end(?:ing)?|quarter end(?:ing)?)\s*[:\-]?\s*([A-Za-z0-9,\/\- ]+)/i
   );
@@ -79,10 +83,11 @@ export function parseStatement(text: string): ParsedStatement {
     }
 
     if (!matchedKey) {
-      if (!investorMatch || !norm.includes("investor")) {
-        if (!dateMatch || !line.includes(dateMatch[0])) {
-          unmatchedLines.push(line);
-        }
+      const isInvestorLine = investorMatch && line.includes(investorMatch[0]);
+      const isFundLine = fundMatch && line.includes(fundMatch[0]);
+      const isDateLine = dateMatch && line.includes(dateMatch[0]);
+      if (!isInvestorLine && !isFundLine && !isDateLine) {
+        unmatchedLines.push(line);
       }
       continue;
     }
@@ -98,5 +103,5 @@ export function parseStatement(text: string): ParsedStatement {
     }
   }
 
-  return { fields, raw, unmatchedLines, investorName, asOfDate };
+  return { fields, raw, unmatchedLines, investorName, fundName, asOfDate };
 }
