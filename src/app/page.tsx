@@ -12,6 +12,25 @@ import { SAMPLE_A, SAMPLE_B } from "@/lib/samples";
 
 type HighlightRange = { start: number; end: number } | null;
 
+function hasFields(stmt: { fields: Record<string, unknown> } | undefined): boolean {
+  return !!stmt && Object.keys(stmt.fields).length > 0;
+}
+
+const PLACEHOLDER_A = `Paste or upload a statement here, e.g.:
+
+Investor: Meridian Pension Trust
+Fund: Northbridge Capital Partners III, L.P.
+As of: June 30, 2026
+
+Beginning Capital Account Balance: $4,812,340.00
+Capital Contributions: $650,000.00
+Distributions: ($210,000.00)
+Ending Capital Account Balance: $5,469,590.00`;
+
+const PLACEHOLDER_B = `Paste or upload the second source here — labels don't need to
+match Source A exactly (e.g. "Opening Balance" vs "Beginning Capital
+Account Balance" are recognized as the same field).`;
+
 const STATUS_STYLE: Record<ReconRow["status"], { bg: string; text: string; label: string }> = {
   match: { bg: "bg-emerald-50", text: "text-emerald-700", label: "Match" },
   rounding: { bg: "bg-sky-50", text: "text-sky-700", label: "Rounding" },
@@ -21,8 +40,8 @@ const STATUS_STYLE: Record<ReconRow["status"], { bg: string; text: string; label
 };
 
 export default function Home() {
-  const [textA, setTextA] = useState(SAMPLE_A);
-  const [textB, setTextB] = useState(SAMPLE_B);
+  const [textA, setTextA] = useState("");
+  const [textB, setTextB] = useState("");
   const [ran, setRan] = useState(false);
   const [loadingA, setLoadingA] = useState(false);
   const [loadingB, setLoadingB] = useState(false);
@@ -174,6 +193,7 @@ export default function Home() {
             onFile={(f) => handleFile(f, "a")}
             loading={loadingA}
             highlight={highlightA}
+            placeholder={PLACEHOLDER_A}
           />
           <StatementInput
             label="Source B"
@@ -183,6 +203,7 @@ export default function Home() {
             onFile={(f) => handleFile(f, "b")}
             loading={loadingB}
             highlight={highlightB}
+            placeholder={PLACEHOLDER_B}
           />
         </div>
 
@@ -197,7 +218,8 @@ export default function Home() {
         <div className="flex items-center gap-3">
           <button
             onClick={() => setRan(true)}
-            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 transition-colors"
+            disabled={!textA.trim() && !textB.trim()}
+            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:bg-zinc-300"
           >
             Reconcile
           </button>
@@ -226,7 +248,12 @@ export default function Home() {
               />
             )}
 
-            {!selectedPair?.a || !selectedPair?.b ? (
+            {!hasFields(selectedPair?.a) && !hasFields(selectedPair?.b) ? (
+              <div className="rounded-lg border border-zinc-200 bg-white px-5 py-8 text-center text-sm text-zinc-500">
+                Nothing to reconcile yet — paste or upload both statements above, then click{" "}
+                <span className="font-medium text-zinc-700">Reconcile</span>.
+              </div>
+            ) : !selectedPair?.a || !selectedPair?.b ? (
               <div className="rounded-lg border border-amber-300 bg-amber-50 px-5 py-4 text-sm text-amber-900">
                 {selectedPair?.label ?? "This investor"} was only found in{" "}
                 {selectedPair?.a ? "Source A" : "Source B"} — nothing to reconcile against.
@@ -322,6 +349,7 @@ function StatementInput({
   onFile,
   loading,
   highlight,
+  placeholder,
 }: {
   label: string;
   hint: string;
@@ -330,6 +358,7 @@ function StatementInput({
   onFile: (file: File) => void;
   loading: boolean;
   highlight: HighlightRange;
+  placeholder?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -340,7 +369,7 @@ function StatementInput({
         <span className="text-xs text-zinc-400">{hint}</span>
       </div>
       <div className="relative">
-        <HighlightableTextarea value={value} onChange={onChange} highlight={highlight} />
+        <HighlightableTextarea value={value} onChange={onChange} highlight={highlight} placeholder={placeholder} />
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center rounded-md bg-white/70 text-xs font-medium text-zinc-500">
             Extracting text…
@@ -383,10 +412,12 @@ function HighlightableTextarea({
   value,
   onChange,
   highlight,
+  placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
   highlight: HighlightRange;
+  placeholder?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const preRef = useRef<HTMLPreElement>(null);
@@ -420,7 +451,13 @@ function HighlightableTextarea({
         {before}
         {highlight && <mark className="rounded-sm bg-yellow-300/70 text-transparent">{marked}</mark>}
         {after}
-        {"\n"}
+        {/* Padding newline so the pre's last line matches the textarea's
+            height — but only when there's other content before it. A
+            newline that is the very first character after <pre> gets
+            silently stripped by the HTML parser (a spec quirk for
+            authoring convenience), which otherwise mismatches between
+            server and client render when value is empty. */}
+        {value && "\n"}
       </pre>
       <textarea
         ref={textareaRef}
@@ -429,7 +466,8 @@ function HighlightableTextarea({
         onScroll={syncScroll}
         rows={16}
         spellCheck={false}
-        className="relative w-full resize-none whitespace-pre-wrap break-words bg-transparent p-3 font-mono text-xs leading-relaxed text-zinc-800 focus:outline-none"
+        placeholder={placeholder}
+        className="relative w-full resize-none whitespace-pre-wrap break-words bg-transparent p-3 font-mono text-xs leading-relaxed text-zinc-800 placeholder:text-zinc-400 focus:outline-none"
       />
     </div>
   );
