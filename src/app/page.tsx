@@ -1,10 +1,12 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { parseStatement } from "@/lib/parse";
-import { reconcile, fmtMoney, ReconRow } from "@/lib/reconcile";
 import { checkIdentity } from "@/lib/identity";
 import { extractPdfText } from "@/lib/pdf";
+import { parseMultiStatement } from "@/lib/parse";
+import { InvestorPair, pairInvestors } from "@/lib/pairing";
+import { toMarkdownReport } from "@/lib/report";
+import { DEFAULT_TOLERANCE, fmtMoney, reconcile, ReconRow, ToleranceConfig } from "@/lib/reconcile";
 import { SAMPLE_A, SAMPLE_B } from "@/lib/samples";
 
 const STATUS_STYLE: Record<ReconRow["status"], { bg: string; text: string; label: string }> = {
@@ -22,16 +24,30 @@ export default function Home() {
   const [loadingA, setLoadingA] = useState(false);
   const [loadingB, setLoadingB] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [tolerance, setTolerance] = useState<ToleranceConfig>(DEFAULT_TOLERANCE);
+  const [selectedPairKey, setSelectedPairKey] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
-  const result = useMemo(() => {
-    const a = parseStatement(textA);
-    const b = parseStatement(textB);
-    const { rows, summary } = reconcile(a, b);
-    const identityMismatches = checkIdentity(a, b);
-    return { a, b, rows, summary, identityMismatches };
+  const textAreaARef = useRef<HTMLTextAreaElement>(null);
+  const textAreaBRef = useRef<HTMLTextAreaElement>(null);
+
+  const pairs = useMemo(() => {
+    const a = parseMultiStatement(textA);
+    const b = parseMultiStatement(textB);
+    return pairInvestors(a, b);
   }, [textA, textB]);
 
-  const needsReview = result.rows.filter((r) => r.status === "break" || r.status === "missing");
+  const selectedPair: InvestorPair =
+    pairs.find((p) => p.key === selectedPairKey) ?? pairs[0];
+
+  const result = useMemo(() => {
+    if (!selectedPair?.a || !selectedPair?.b) return null;
+    const { rows, summary } = reconcile(selectedPair.a, selectedPair.b, tolerance);
+    const identityMismatches = checkIdentity(selectedPair.a, selectedPair.b);
+    return { rows, summary, identityMismatches };
+  }, [selectedPair, tolerance]);
+
+  const needsReview = result?.rows.filter((r) => r.status === "break" || r.status === "missing") ?? [];
 
   async function handleFile(file: File, which: "a" | "b") {
     setFileError(null);
@@ -50,6 +66,37 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function highlightSource(row: ReconRow) {
+    const highlight = (ref: React.RefObject<HTMLTextAreaElement | null>, stmt: typeof selectedPair.a) => {
+      const raw = stmt?.raw[row.key];
+      const el = ref.current;
+      if (!raw || !el) return;
+      el.focus();
+      el.setSelectionRange(raw.start, raw.end);
+      const before = el.value.slice(0, raw.start);
+      const lineNumber = before.split("\n").length;
+      const lineHeight = 18; // matches text-xs leading-relaxed in the textarea below
+      el.scrollTop = Math.max(0, (lineNumber - 3) * lineHeight);
+    };
+    highlight(textAreaARef, selectedPair.a);
+    highlight(textAreaBRef, selectedPair.b);
+  }
+
+  async function copyReport() {
+    if (!result || !selectedPair.a) return;
+    const md = toMarkdownReport({
+      investorLabel: selectedPair.label,
+      fundName: selectedPair.a.fundName ?? selectedPair.b?.fundName,
+      asOfDate: selectedPair.a.asOfDate ?? selectedPair.b?.asOfDate,
+      rows: result.rows,
+      tieOutA: result.summary.tieOutA,
+      tieOutB: result.summary.tieOutB,
+    });
+    await navigator.clipboard.writeText(md);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
 
   return (
@@ -74,6 +121,7 @@ export default function Home() {
             onChange={setTextA}
             onFile={(f) => handleFile(f, "a")}
             loading={loadingA}
+            textareaRef={textAreaARef}
           />
           <StatementInput
             label="Source B"
@@ -82,6 +130,7 @@ export default function Home() {
             onChange={setTextB}
             onFile={(f) => handleFile(f, "b")}
             loading={loadingB}
+            textareaRef={textAreaBRef}
           />
         </div>
 
@@ -90,6 +139,8 @@ export default function Home() {
             {fileError}
           </div>
         )}
+
+        <ToleranceControls tolerance={tolerance} onChange={setTolerance} />
 
         <div className="flex items-center gap-3">
           <button
@@ -115,50 +166,80 @@ export default function Home() {
 
         {ran && (
           <>
-            {result.identityMismatches.length > 0 && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 px-5 py-4">
-                <h2 className="text-sm font-semibold text-amber-900">
-                  Check you're comparing the right documents
-                </h2>
-                <ul className="mt-2 space-y-1 text-sm text-amber-800">
-                  {result.identityMismatches.map((m) => (
-                    <li key={m.field}>
-                      <span className="font-medium">{m.field}:</span> Source A says &ldquo;{m.a}&rdquo;, Source B
-                      says &ldquo;{m.b}&rdquo;.
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <SummaryBar summary={result.summary} totalRows={result.rows.length} />
-
-            {needsReview.length > 0 && (
-              <div className="rounded-lg border border-rose-200 bg-rose-50/60 px-5 py-4">
-                <h2 className="text-sm font-semibold text-rose-800">
-                  {needsReview.length} item{needsReview.length > 1 ? "s" : ""} need analyst review
-                </h2>
-                <ul className="mt-2 space-y-1 text-sm text-rose-700">
-                  {needsReview.map((r) => (
-                    <li key={r.key}>
-                      <span className="font-medium">{r.label}:</span> {r.explanation}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <ReconTable rows={result.rows} />
-
-            {(result.summary.tieOutA !== null || result.summary.tieOutB !== null) && (
-              <TieOutCheck
-                tieOutA={result.summary.tieOutA}
-                tieOutB={result.summary.tieOutB}
+            {pairs.length > 1 && (
+              <InvestorTabs
+                pairs={pairs}
+                selectedKey={selectedPair?.key}
+                onSelect={setSelectedPairKey}
               />
             )}
 
-            {(result.a.unmatchedLines.length > 0 || result.b.unmatchedLines.length > 0) && (
-              <UnmatchedLines a={result.a.unmatchedLines} b={result.b.unmatchedLines} />
+            {!selectedPair?.a || !selectedPair?.b ? (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+                {selectedPair?.label ?? "This investor"} was only found in{" "}
+                {selectedPair?.a ? "Source A" : "Source B"} — nothing to reconcile against.
+              </div>
+            ) : (
+              result && (
+                <>
+                  {result.identityMismatches.length > 0 && (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-5 py-4">
+                      <h2 className="text-sm font-semibold text-amber-900">
+                        Check you&apos;re comparing the right documents
+                      </h2>
+                      <ul className="mt-2 space-y-1 text-sm text-amber-800">
+                        {result.identityMismatches.map((m) => (
+                          <li key={m.field}>
+                            <span className="font-medium">{m.field}:</span> Source A says &ldquo;{m.a}
+                            &rdquo;, Source B says &ldquo;{m.b}&rdquo;.
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <SummaryBar summary={result.summary} totalRows={result.rows.length} />
+
+                  {needsReview.length > 0 && (
+                    <div className="rounded-lg border border-rose-200 bg-rose-50/60 px-5 py-4">
+                      <h2 className="text-sm font-semibold text-rose-800">
+                        {needsReview.length} item{needsReview.length > 1 ? "s" : ""} need analyst
+                        review
+                      </h2>
+                      <ul className="mt-2 space-y-1 text-sm text-rose-700">
+                        {needsReview.map((r) => (
+                          <li key={r.key}>
+                            <span className="font-medium">{r.label}:</span> {r.explanation}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-zinc-700">
+                      Line items — click a row to highlight it in the source text
+                    </h2>
+                    <button
+                      onClick={copyReport}
+                      className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                    >
+                      {copied ? "Copied ✓" : "Copy report as Markdown"}
+                    </button>
+                  </div>
+
+                  <ReconTable rows={result.rows} onRowClick={highlightSource} />
+
+                  {(result.summary.tieOutA !== null || result.summary.tieOutB !== null) && (
+                    <TieOutCheck tieOutA={result.summary.tieOutA} tieOutB={result.summary.tieOutB} />
+                  )}
+
+                  {(selectedPair.a.unmatchedLines.length > 0 ||
+                    selectedPair.b.unmatchedLines.length > 0) && (
+                    <UnmatchedLines a={selectedPair.a.unmatchedLines} b={selectedPair.b.unmatchedLines} />
+                  )}
+                </>
+              )
             )}
           </>
         )}
@@ -174,6 +255,7 @@ function StatementInput({
   onChange,
   onFile,
   loading,
+  textareaRef,
 }: {
   label: string;
   hint: string;
@@ -181,6 +263,7 @@ function StatementInput({
   onChange: (v: string) => void;
   onFile: (file: File) => void;
   loading: boolean;
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -192,6 +275,7 @@ function StatementInput({
       </div>
       <div className="relative">
         <textarea
+          ref={textareaRef}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           rows={16}
@@ -228,6 +312,81 @@ function StatementInput({
   );
 }
 
+function ToleranceControls({
+  tolerance,
+  onChange,
+}: {
+  tolerance: ToleranceConfig;
+  onChange: (t: ToleranceConfig) => void;
+}) {
+  return (
+    <details className="rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm">
+      <summary className="cursor-pointer font-medium text-zinc-600">
+        Tolerance settings ({fmtMoney(tolerance.absTolerance)} / {(tolerance.roundingPct * 100).toFixed(2)}%)
+      </summary>
+      <div className="mt-3 flex flex-wrap items-center gap-6">
+        <label className="flex items-center gap-2">
+          <span className="text-xs text-zinc-500">Exact-match tolerance ($)</span>
+          <input
+            type="number"
+            min={0}
+            step={0.01}
+            value={tolerance.absTolerance}
+            onChange={(e) => onChange({ ...tolerance, absTolerance: Number(e.target.value) || 0 })}
+            className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="text-xs text-zinc-500">Rounding threshold (%)</span>
+          <input
+            type="number"
+            min={0}
+            step={0.01}
+            value={tolerance.roundingPct * 100}
+            onChange={(e) =>
+              onChange({ ...tolerance, roundingPct: (Number(e.target.value) || 0) / 100 })
+            }
+            className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          />
+        </label>
+      </div>
+    </details>
+  );
+}
+
+function InvestorTabs({
+  pairs,
+  selectedKey,
+  onSelect,
+}: {
+  pairs: InvestorPair[];
+  selectedKey?: string;
+  onSelect: (key: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {pairs.map((p) => {
+        const isSelected = p.key === selectedKey || (!selectedKey && p === pairs[0]);
+        const complete = p.a && p.b;
+        return (
+          <button
+            key={p.key}
+            onClick={() => onSelect(p.key)}
+            className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+              isSelected
+                ? "border-zinc-900 bg-zinc-900 text-white"
+                : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-50"
+            }`}
+          >
+            {p.label}
+            {!complete && <span className="ml-1.5 text-amber-500">●</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function SummaryBar({
   summary,
   totalRows,
@@ -256,7 +415,7 @@ function SummaryBar({
   );
 }
 
-function ReconTable({ rows }: { rows: ReconRow[] }) {
+function ReconTable({ rows, onRowClick }: { rows: ReconRow[]; onRowClick: (row: ReconRow) => void }) {
   return (
     <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
       <table className="w-full text-sm">
@@ -274,7 +433,11 @@ function ReconTable({ rows }: { rows: ReconRow[] }) {
           {rows.map((r) => {
             const style = STATUS_STYLE[r.status];
             return (
-              <tr key={r.key} className="border-b border-zinc-100 last:border-0 align-top">
+              <tr
+                key={r.key}
+                onClick={() => onRowClick(r)}
+                className="cursor-pointer border-b border-zinc-100 last:border-0 align-top hover:bg-zinc-50"
+              >
                 <td className="px-4 py-3 font-medium text-zinc-800 whitespace-nowrap">{r.label}</td>
                 <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
                   {r.a !== undefined ? fmtMoney(r.a) : "—"}

@@ -2,14 +2,20 @@ import { FIELD_ALIASES, FieldKey } from "./fields";
 
 export type ParsedStatement = {
   fields: Partial<Record<FieldKey, number>>;
-  raw: Record<FieldKey, { label: string; line: string } | undefined>;
+  // start/end are character offsets into the *original* text passed to
+  // parseMultiStatement, so the UI can highlight the exact source line
+  // regardless of which investor block it came from.
+  raw: Record<FieldKey, { label: string; line: string; start: number; end: number } | undefined>;
   unmatchedLines: string[];
   investorName?: string;
   fundName?: string;
   asOfDate?: string;
 };
 
+export type MultiParsedStatement = ParsedStatement & { blockStart: number; blockEnd: number };
+
 const NUMBER_RE = /\(?-?\$?\s?[\d,]+(?:\.\d+)?\)?%?/g;
+const INVESTOR_LINE_RE = /^investor(?:\s*name)?\s*[:\-]\s*.+$/gim;
 
 function parseNumber(token: string): number | null {
   let t = token.trim();
@@ -49,8 +55,13 @@ function containsAlias(norm: string, alias: string): boolean {
   return re.test(norm);
 }
 
-export function parseStatement(text: string): ParsedStatement {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+/**
+ * Parse a single statement's worth of text. `baseOffset` shifts every
+ * reported line's start/end so they stay valid character offsets into a
+ * larger document when this text is a slice of one (see parseMultiStatement).
+ */
+export function parseStatement(text: string, baseOffset = 0): ParsedStatement {
+  const rawLines = text.split("\n");
   const fields: Partial<Record<FieldKey, number>> = {};
   const raw: ParsedStatement["raw"] = {} as ParsedStatement["raw"];
   const unmatchedLines: string[] = [];
@@ -67,7 +78,16 @@ export function parseStatement(text: string): ParsedStatement {
   );
   if (dateMatch) asOfDate = dateMatch[1].trim();
 
-  for (const line of lines) {
+  let cursor = 0;
+  for (const rawLine of rawLines) {
+    const line = rawLine.trim();
+    const lineOffsetInRaw = rawLine.indexOf(line);
+    const start = baseOffset + cursor + (lineOffsetInRaw === -1 ? 0 : lineOffsetInRaw);
+    const end = start + line.length;
+    cursor += rawLine.length + 1; // +1 for the newline split() consumed
+
+    if (!line) continue;
+
     const norm = normalize(line);
     let matchedKey: FieldKey | null = null;
 
@@ -99,9 +119,43 @@ export function parseStatement(text: string): ParsedStatement {
     // label, prefer the first hit (aliases are ordered most-specific-first).
     if (fields[matchedKey] === undefined) {
       fields[matchedKey] = value;
-      raw[matchedKey] = { label: matchedKey, line };
+      raw[matchedKey] = { label: matchedKey, line, start, end };
     }
   }
 
   return { fields, raw, unmatchedLines, investorName, fundName, asOfDate };
+}
+
+/**
+ * Split a document into one ParsedStatement per "Investor:" line found,
+ * for documents that list a whole LP roster (a schedule of investors)
+ * rather than a single investor's statement. A preamble before the first
+ * investor line (shared fund name / as-of date / totals) is folded into
+ * every block as a fallback. Falls back to a single whole-document parse
+ * when there's 0 or 1 investor line, so single-investor statements behave
+ * exactly as before.
+ */
+export function parseMultiStatement(text: string): MultiParsedStatement[] {
+  const matches = [...text.matchAll(INVESTOR_LINE_RE)];
+
+  if (matches.length <= 1) {
+    return [{ ...parseStatement(text, 0), blockStart: 0, blockEnd: text.length }];
+  }
+
+  const preamble = parseStatement(text.slice(0, matches[0].index!), 0);
+
+  return matches.map((match, i) => {
+    const start = match.index!;
+    const end = i + 1 < matches.length ? matches[i + 1].index! : text.length;
+    const parsed = parseStatement(text.slice(start, end), start);
+    return {
+      ...parsed,
+      fundName: parsed.fundName ?? preamble.fundName,
+      asOfDate: parsed.asOfDate ?? preamble.asOfDate,
+      fields: { ...preamble.fields, ...parsed.fields },
+      raw: { ...preamble.raw, ...parsed.raw },
+      blockStart: start,
+      blockEnd: end,
+    };
+  });
 }

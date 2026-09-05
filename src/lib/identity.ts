@@ -2,9 +2,11 @@ import { ParsedStatement } from "./parse";
 
 export type IdentityCheck = { field: string; a: string; b: string };
 
-function normalize(s: string): string {
+export function normalizeName(s: string): string {
   return s.toLowerCase().replace(/[.,]/g, "").replace(/\s+/g, " ").trim();
 }
+
+const normalize = normalizeName;
 
 // Catches the "reconciled the wrong pair of documents" failure mode — e.g.
 // diffing this quarter's statement against last quarter's, or one investor

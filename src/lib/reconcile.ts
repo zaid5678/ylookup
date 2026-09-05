@@ -14,8 +14,17 @@ export type ReconRow = {
   explanation: string;
 };
 
-const ABS_TOLERANCE = 0.01;
-const ROUNDING_PCT = 0.001; // 0.1%
+export type ToleranceConfig = {
+  /** Below this absolute $ difference, treat as an exact match regardless of percentage. */
+  absTolerance: number;
+  /** Below this fraction of the larger value, treat as immaterial rounding rather than a break. */
+  roundingPct: number;
+};
+
+export const DEFAULT_TOLERANCE: ToleranceConfig = {
+  absTolerance: 0.01,
+  roundingPct: 0.001, // 0.1%
+};
 
 function fmtMoney(n: number): string {
   const sign = n < 0 ? "-" : "";
@@ -44,7 +53,12 @@ function tieOut(fields: Partial<Record<FieldKey, number>>): number | null {
   return computed - fields.endingCapital;
 }
 
-export function reconcile(a: ParsedStatement, b: ParsedStatement) {
+export function reconcile(
+  a: ParsedStatement,
+  b: ParsedStatement,
+  tolerance: ToleranceConfig = DEFAULT_TOLERANCE
+) {
+  const { absTolerance, roundingPct } = tolerance;
   const rows: ReconRow[] = [];
 
   for (const key of FIELD_ORDER) {
@@ -73,7 +87,7 @@ export function reconcile(a: ParsedStatement, b: ParsedStatement) {
     const base = Math.max(Math.abs(av), Math.abs(bv), 1);
     const pctOfBase = Math.abs(diff) / base;
 
-    if (Math.abs(diff) <= ABS_TOLERANCE) {
+    if (Math.abs(diff) <= absTolerance) {
       rows.push({ key, label, a: av, b: bv, diff, pctOfBase, status: "match", explanation: "Ties out." });
       continue;
     }
@@ -86,13 +100,13 @@ export function reconcile(a: ParsedStatement, b: ParsedStatement) {
       if (otherKey === key) continue;
       const otherA = a.fields[otherKey];
       const otherB = b.fields[otherKey];
-      if (otherA !== undefined && Math.abs(Math.abs(diff) - Math.abs(otherA)) <= ABS_TOLERANCE) {
+      if (otherA !== undefined && Math.abs(Math.abs(diff) - Math.abs(otherA)) <= absTolerance) {
         explained = `Variance of ${fmtMoney(diff)} matches Source A's "${FIELD_LABELS[otherKey]}" (${fmtMoney(
           otherA
         )}) — likely classified under a different line item between sources.`;
         break;
       }
-      if (otherB !== undefined && Math.abs(Math.abs(diff) - Math.abs(otherB)) <= ABS_TOLERANCE) {
+      if (otherB !== undefined && Math.abs(Math.abs(diff) - Math.abs(otherB)) <= absTolerance) {
         explained = `Variance of ${fmtMoney(diff)} matches Source B's "${FIELD_LABELS[otherKey]}" (${fmtMoney(
           otherB
         )}) — likely classified under a different line item between sources.`;
@@ -105,7 +119,7 @@ export function reconcile(a: ParsedStatement, b: ParsedStatement) {
       continue;
     }
 
-    if (pctOfBase <= ROUNDING_PCT) {
+    if (pctOfBase <= roundingPct) {
       rows.push({
         key,
         label,

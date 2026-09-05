@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored third-party file, not something we own or should lint.
+    "public/pdf/**",
   ]),
 ]);
 
