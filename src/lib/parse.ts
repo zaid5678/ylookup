@@ -10,18 +10,40 @@ export type ParsedStatement = {
   investorName?: string;
   fundName?: string;
   asOfDate?: string;
+  /** ISO 4217 code, detected from an explicit "Currency:" line or the dominant symbol. */
+  currency?: string;
 };
 
 export type MultiParsedStatement = ParsedStatement & { blockStart: number; blockEnd: number };
 
-const NUMBER_RE = /\(?-?\$?\s?[\d,]+(?:\.\d+)?\)?%?/g;
+const NUMBER_RE = /\(?-?[$€£]?\s?[\d,]+(?:\.\d+)?\)?%?/g;
 const INVESTOR_LINE_RE = /^investor(?:\s*name)?\s*[:\-]\s*.+$/gim;
+
+const SYMBOL_TO_CURRENCY: Record<string, string> = { "$": "USD", "€": "EUR", "£": "GBP" };
+const KNOWN_CURRENCY_CODES = new Set(["USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD"]);
+
+function detectCurrency(text: string): string | undefined {
+  const explicit = text.match(/currency\s*[:\-]\s*([A-Za-z]{3})/i);
+  if (explicit && KNOWN_CURRENCY_CODES.has(explicit[1].toUpperCase())) {
+    return explicit[1].toUpperCase();
+  }
+
+  const counts: Record<string, number> = {};
+  for (const symbol of Object.keys(SYMBOL_TO_CURRENCY)) {
+    const matches = text.match(new RegExp(`\\${symbol}`, "g"));
+    if (matches) counts[SYMBOL_TO_CURRENCY[symbol]] = matches.length;
+  }
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return undefined;
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries[0][0];
+}
 
 function parseNumber(token: string): number | null {
   let t = token.trim();
   if (!t) return null;
   const negative = t.startsWith("(") && t.endsWith(")");
-  t = t.replace(/[()$,%\s]/g, "");
+  t = t.replace(/[()$€£,%\s]/g, "");
   if (!t || isNaN(Number(t))) return null;
   const n = Number(t);
   return negative ? -n : n;
@@ -123,7 +145,9 @@ export function parseStatement(text: string, baseOffset = 0): ParsedStatement {
     }
   }
 
-  return { fields, raw, unmatchedLines, investorName, fundName, asOfDate };
+  const currency = detectCurrency(text);
+
+  return { fields, raw, unmatchedLines, investorName, fundName, asOfDate, currency };
 }
 
 /**
@@ -152,6 +176,7 @@ export function parseMultiStatement(text: string): MultiParsedStatement[] {
       ...parsed,
       fundName: parsed.fundName ?? preamble.fundName,
       asOfDate: parsed.asOfDate ?? preamble.asOfDate,
+      currency: parsed.currency ?? preamble.currency,
       fields: { ...preamble.fields, ...parsed.fields },
       raw: { ...preamble.raw, ...parsed.raw },
       blockStart: start,

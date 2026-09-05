@@ -32,7 +32,15 @@ This does that reconciliation automatically:
   exact line it came from in both source panels.
 - **Exportable report** — one click copies the reconciliation as Markdown,
   ready to paste into an email or ticket.
-- Runs entirely client-side; no statement data leaves the browser.
+- **Multi-currency** — detects each source's currency (explicit `Currency:`
+  line or dominant `$`/`€`/`£` symbol) and, when they differ, converts
+  Source B using a live ECB reference rate from
+  [frankfurter.dev](https://frankfurter.dev) ([`src/lib/fx.ts`](src/lib/fx.ts)),
+  with a manual-override input since a spot rate isn't always the
+  contractual rate a fund actually used.
+- Runs entirely client-side; no statement data leaves the browser (the FX
+  lookup sends only two currency codes, never document contents, to a
+  third party).
 
 ## Running it
 

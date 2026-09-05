@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { checkIdentity } from "@/lib/identity";
 import { extractPdfText } from "@/lib/pdf";
+import { convertStatement, fetchFxRate, FxRate } from "@/lib/fx";
 import { parseMultiStatement } from "@/lib/parse";
 import { InvestorPair, pairInvestors } from "@/lib/pairing";
 import { toMarkdownReport } from "@/lib/report";
@@ -40,12 +41,60 @@ export default function Home() {
   const selectedPair: InvestorPair =
     pairs.find((p) => p.key === selectedPairKey) ?? pairs[0];
 
+  const currencyA = selectedPair?.a?.currency;
+  const currencyB = selectedPair?.b?.currency;
+  const needsFx = !!currencyA && !!currencyB && currencyA !== currencyB;
+
+  const [liveRate, setLiveRate] = useState<FxRate | null>(null);
+  const [fxLoading, setFxLoading] = useState(false);
+  const [fxError, setFxError] = useState<string | null>(null);
+  const [manualRateInput, setManualRateInput] = useState("");
+
+  useEffect(() => {
+    // Data-fetching effect: reset stale results for the previous currency
+    // pair, then fetch the new one. This is the standard imperative-effect
+    // pattern for async fetches keyed off changing inputs.
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setLiveRate(null);
+    setFxError(null);
+    setManualRateInput("");
+    if (!needsFx || !currencyB || !currencyA) return;
+    let cancelled = false;
+    setFxLoading(true);
+    fetchFxRate(currencyB, currencyA)
+      .then((rate) => {
+        if (!cancelled) setLiveRate(rate);
+      })
+      .catch((err) => {
+        if (!cancelled) setFxError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setFxLoading(false);
+      });
+    /* eslint-enable react-hooks/set-state-in-effect */
+    return () => {
+      cancelled = true;
+    };
+  }, [needsFx, currencyA, currencyB]);
+
+  const manualRate = manualRateInput.trim() ? Number(manualRateInput) : null;
+  const effectiveRate = manualRate && manualRate > 0 ? manualRate : liveRate?.rate ?? null;
+
+  // Cheap (12-field) conversion — not worth memoizing, and doing so trips
+  // the React Compiler's dependency inference on the optional selectedPair.b.
+  const convertedB = !selectedPair?.b
+    ? undefined
+    : !needsFx || effectiveRate === null
+    ? selectedPair.b
+    : convertStatement(selectedPair.b, effectiveRate);
+
   const result = useMemo(() => {
-    if (!selectedPair?.a || !selectedPair?.b) return null;
-    const { rows, summary } = reconcile(selectedPair.a, selectedPair.b, tolerance);
-    const identityMismatches = checkIdentity(selectedPair.a, selectedPair.b);
+    if (!selectedPair?.a || !convertedB) return null;
+    if (needsFx && effectiveRate === null) return null; // waiting on a rate before comparing numbers
+    const { rows, summary } = reconcile(selectedPair.a, convertedB, tolerance);
+    const identityMismatches = checkIdentity(selectedPair.a, selectedPair.b!);
     return { rows, summary, identityMismatches };
-  }, [selectedPair, tolerance]);
+  }, [selectedPair, convertedB, tolerance, needsFx, effectiveRate]);
 
   const needsReview = result?.rows.filter((r) => r.status === "break" || r.status === "missing") ?? [];
 
@@ -180,7 +229,20 @@ export default function Home() {
                 {selectedPair?.a ? "Source A" : "Source B"} — nothing to reconcile against.
               </div>
             ) : (
-              result && (
+              <>
+                {needsFx && (
+                  <FxBanner
+                    from={currencyB!}
+                    to={currencyA!}
+                    liveRate={liveRate}
+                    loading={fxLoading}
+                    error={fxError}
+                    manualRateInput={manualRateInput}
+                    onManualRateChange={setManualRateInput}
+                  />
+                )}
+
+                {result && (
                 <>
                   {result.identityMismatches.length > 0 && (
                     <div className="rounded-lg border border-amber-300 bg-amber-50 px-5 py-4">
@@ -239,7 +301,8 @@ export default function Home() {
                     <UnmatchedLines a={selectedPair.a.unmatchedLines} b={selectedPair.b.unmatchedLines} />
                   )}
                 </>
-              )
+                )}
+              </>
             )}
           </>
         )}
@@ -308,6 +371,54 @@ function StatementInput({
           }}
         />
       </div>
+    </div>
+  );
+}
+
+function FxBanner({
+  from,
+  to,
+  liveRate,
+  loading,
+  error,
+  manualRateInput,
+  onManualRateChange,
+}: {
+  from: string;
+  to: string;
+  liveRate: FxRate | null;
+  loading: boolean;
+  error: string | null;
+  manualRateInput: string;
+  onManualRateChange: (v: string) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-5 py-4 text-sm text-indigo-900">
+      <h2 className="text-sm font-semibold">Source B is in {from}, Source A is in {to}</h2>
+      {loading && <p className="mt-1 text-indigo-700">Fetching a live {from}→{to} rate…</p>}
+      {!loading && liveRate && !manualRateInput.trim() && (
+        <p className="mt-1 text-indigo-700">
+          Converting Source B at 1 {from} = {liveRate.rate} {to} (ECB reference rate, {liveRate.date}).
+          Spot rate, not necessarily the contractual rate the fund used — override below if you know it.
+        </p>
+      )}
+      {!loading && error && !manualRateInput.trim() && (
+        <p className="mt-1 text-rose-700">
+          Couldn&apos;t fetch a live rate ({error}). Enter a rate manually to proceed.
+        </p>
+      )}
+      <label className="mt-2 flex items-center gap-2">
+        <span className="text-xs text-indigo-700">Override rate (1 {from} = ? {to})</span>
+        <input
+          type="number"
+          min={0}
+          step="any"
+          placeholder={liveRate ? String(liveRate.rate) : "e.g. 1.16"}
+          value={manualRateInput}
+          onChange={(e) => onManualRateChange(e.target.value)}
+          className="w-28 rounded-md border border-indigo-300 px-2 py-1 text-sm"
+        />
+      </label>
     </div>
   );
 }
