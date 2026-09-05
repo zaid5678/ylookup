@@ -10,6 +10,8 @@ import { toMarkdownReport } from "@/lib/report";
 import { DEFAULT_TOLERANCE, fmtMoney, reconcile, ReconRow, ToleranceConfig } from "@/lib/reconcile";
 import { SAMPLE_A, SAMPLE_B } from "@/lib/samples";
 
+type HighlightRange = { start: number; end: number } | null;
+
 const STATUS_STYLE: Record<ReconRow["status"], { bg: string; text: string; label: string }> = {
   match: { bg: "bg-emerald-50", text: "text-emerald-700", label: "Match" },
   rounding: { bg: "bg-sky-50", text: "text-sky-700", label: "Rounding" },
@@ -28,9 +30,19 @@ export default function Home() {
   const [tolerance, setTolerance] = useState<ToleranceConfig>(DEFAULT_TOLERANCE);
   const [selectedPairKey, setSelectedPairKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [highlightA, setHighlightA] = useState<HighlightRange>(null);
+  const [highlightB, setHighlightB] = useState<HighlightRange>(null);
 
-  const textAreaARef = useRef<HTMLTextAreaElement>(null);
-  const textAreaBRef = useRef<HTMLTextAreaElement>(null);
+  function updateTextA(v: string) {
+    setTextA(v);
+    setHighlightA(null);
+    setHighlightB(null);
+  }
+  function updateTextB(v: string) {
+    setTextB(v);
+    setHighlightA(null);
+    setHighlightB(null);
+  }
 
   const pairs = useMemo(() => {
     const a = parseMultiStatement(textA);
@@ -101,7 +113,7 @@ export default function Home() {
   async function handleFile(file: File, which: "a" | "b") {
     setFileError(null);
     const setLoading = which === "a" ? setLoadingA : setLoadingB;
-    const setText = which === "a" ? setTextA : setTextB;
+    const setText = which === "a" ? updateTextA : updateTextB;
     setLoading(true);
     try {
       if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
@@ -118,19 +130,10 @@ export default function Home() {
   }
 
   function highlightSource(row: ReconRow) {
-    const highlight = (ref: React.RefObject<HTMLTextAreaElement | null>, stmt: typeof selectedPair.a) => {
-      const raw = stmt?.raw[row.key];
-      const el = ref.current;
-      if (!raw || !el) return;
-      el.focus();
-      el.setSelectionRange(raw.start, raw.end);
-      const before = el.value.slice(0, raw.start);
-      const lineNumber = before.split("\n").length;
-      const lineHeight = 18; // matches text-xs leading-relaxed in the textarea below
-      el.scrollTop = Math.max(0, (lineNumber - 3) * lineHeight);
-    };
-    highlight(textAreaARef, selectedPair.a);
-    highlight(textAreaBRef, selectedPair.b);
+    const rawA = selectedPair.a?.raw[row.key];
+    const rawB = selectedPair.b?.raw[row.key];
+    setHighlightA(rawA ? { start: rawA.start, end: rawA.end } : null);
+    setHighlightB(rawB ? { start: rawB.start, end: rawB.end } : null);
   }
 
   async function copyReport() {
@@ -167,19 +170,19 @@ export default function Home() {
             label="Source A"
             hint="e.g. Fund administrator statement"
             value={textA}
-            onChange={setTextA}
+            onChange={updateTextA}
             onFile={(f) => handleFile(f, "a")}
             loading={loadingA}
-            textareaRef={textAreaARef}
+            highlight={highlightA}
           />
           <StatementInput
             label="Source B"
             hint="e.g. LP's own record / custodian feed"
             value={textB}
-            onChange={setTextB}
+            onChange={updateTextB}
             onFile={(f) => handleFile(f, "b")}
             loading={loadingB}
-            textareaRef={textAreaBRef}
+            highlight={highlightB}
           />
         </div>
 
@@ -200,8 +203,8 @@ export default function Home() {
           </button>
           <button
             onClick={() => {
-              setTextA(SAMPLE_A);
-              setTextB(SAMPLE_B);
+              updateTextA(SAMPLE_A);
+              updateTextB(SAMPLE_B);
               setRan(true);
             }}
             className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-white transition-colors"
@@ -318,7 +321,7 @@ function StatementInput({
   onChange,
   onFile,
   loading,
-  textareaRef,
+  highlight,
 }: {
   label: string;
   hint: string;
@@ -326,7 +329,7 @@ function StatementInput({
   onChange: (v: string) => void;
   onFile: (file: File) => void;
   loading: boolean;
-  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  highlight: HighlightRange;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -337,14 +340,7 @@ function StatementInput({
         <span className="text-xs text-zinc-400">{hint}</span>
       </div>
       <div className="relative">
-        <textarea
-          ref={textareaRef}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          rows={16}
-          spellCheck={false}
-          className="w-full resize-none rounded-md border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs leading-relaxed text-zinc-800 focus:border-zinc-400 focus:outline-none"
-        />
+        <HighlightableTextarea value={value} onChange={onChange} highlight={highlight} />
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center rounded-md bg-white/70 text-xs font-medium text-zinc-500">
             Extracting text…
@@ -371,6 +367,70 @@ function StatementInput({
           }}
         />
       </div>
+    </div>
+  );
+}
+
+// Native <textarea> selection only paints while the element has focus, so
+// highlighting both source panels at once (one per side of a reconciliation
+// row) can't use setSelectionRange — only whichever panel was focused last
+// would visibly show it. Instead we render a backing <pre> with the matched
+// line wrapped in <mark>, positioned under a transparent-background textarea
+// so the highlight paints regardless of focus, and keep them scroll-synced.
+const LINE_HEIGHT_PX = 18; // matches text-xs leading-relaxed below
+
+function HighlightableTextarea({
+  value,
+  onChange,
+  highlight,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  highlight: HighlightRange;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const preRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    if (!highlight || !textareaRef.current || !preRef.current) return;
+    const lineNumber = value.slice(0, highlight.start).split("\n").length;
+    const top = Math.max(0, (lineNumber - 3) * LINE_HEIGHT_PX);
+    textareaRef.current.scrollTop = top;
+    preRef.current.scrollTop = top;
+  }, [highlight, value]);
+
+  const syncScroll = () => {
+    if (preRef.current && textareaRef.current) {
+      preRef.current.scrollTop = textareaRef.current.scrollTop;
+      preRef.current.scrollLeft = textareaRef.current.scrollLeft;
+    }
+  };
+
+  const before = highlight ? value.slice(0, highlight.start) : value;
+  const marked = highlight ? value.slice(highlight.start, highlight.end) : "";
+  const after = highlight ? value.slice(highlight.end) : "";
+
+  return (
+    <div className="relative rounded-md border border-zinc-200 bg-zinc-50 focus-within:border-zinc-400">
+      <pre
+        ref={preRef}
+        aria-hidden
+        className="pointer-events-none absolute inset-0 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed text-transparent"
+      >
+        {before}
+        {highlight && <mark className="rounded-sm bg-yellow-300/70 text-transparent">{marked}</mark>}
+        {after}
+        {"\n"}
+      </pre>
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onScroll={syncScroll}
+        rows={16}
+        spellCheck={false}
+        className="relative w-full resize-none whitespace-pre-wrap break-words bg-transparent p-3 font-mono text-xs leading-relaxed text-zinc-800 focus:outline-none"
+      />
     </div>
   );
 }
